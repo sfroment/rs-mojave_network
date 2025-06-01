@@ -155,5 +155,234 @@ fn extract_protocol_from_multiaddr(address: &Multiaddr) -> Result<Protocol, Erro
   				break;
   			}
 	}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use multiaddr::{Multiaddr, PeerId};
+    use rs_mojave_network_core::Protocol;
+    use std::collections::HashMap;
+    use rs_mojave_network_core::{transport::Transport, connection::Connection, stream_muxer::StreamMuxerBox};
+    use async_trait::async_trait;
+    use std::io;
+
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct MockTransport {
+        remote_peer_id: PeerId,
+        listen_on_called: Arc<Mutex<bool>>,
+    }
+
+    impl MockTransport {
+        fn new(remote_peer_id: PeerId) -> Self {
+            Self {
+                remote_peer_id,
+                listen_on_called: Arc::new(Mutex::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Transport for MockTransport {
+        type Output = (PeerId, StreamMuxerBox);
+        type Error = io::Error;
+        type Listener = futures::stream::Pending<Result<Self::ListenerUpgrade, Self::Error>>;
+        type ListenerUpgrade = futures::future::Pending<Result<Self::Output, Self::Error>>;
+        type Dial = futures::future::BoxFuture<'static, Result<Self::Output, Self::Error>>;
+
+        fn listen_on(&mut self, _addr: Multiaddr) -> Result<Self::Listener, Self::Error> {
+            *self.listen_on_called.lock().unwrap() = true;
+            Ok(futures::stream::pending())
+        }
+
+        fn dial(&mut self, _peer_id: PeerId, _addr: Multiaddr) -> Result<Self::Dial, Self::Error> {
+            let remote_peer_id = self.remote_peer_id.clone();
+            Ok(Box::pin(async move { Ok((remote_peer_id, StreamMuxerBox::new_null())) }))
+        }
+    }
+
+    #[test]
+    fn test_node_creation() {
+        let peer_id = PeerId::random();
+        let transports = HashMap::new();
+        let node = Node::new(peer_id.clone(), transports);
+        assert_eq!(node.peer_id, peer_id);
+    }
+
+    #[tokio::test]
+    async fn test_dial_remote_peer() {
+        let local_peer_id = PeerId::random();
+        let remote_peer_id = PeerId::random();
+        let remote_addr: Multiaddr = "/ip4/127.0.0.1/udp/9090/webtransport"
+            .parse()
+            .unwrap();
+
+        let mock_transport = MockTransport::new(remote_peer_id.clone());
+        let mut transports = HashMap::new();
+        transports.insert(Protocol::WebTransport, Box::new(mock_transport.clone()) as Box<dyn Transport<Output = (PeerId, StreamMuxerBox), Error = io::Error, Listener = futures::stream::Pending<Result<futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, io::Error>>, ListenerUpgrade = futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, Dial = futures::future::BoxFuture<'static, Result<(PeerId, StreamMuxerBox), io::Error>>> + Send>);
+
+        let mut node = Node::new(local_peer_id, transports);
+
+        let result = node.dial(remote_peer_id.clone(), remote_addr).await;
+        assert!(result.is_ok());
+        assert!(node.peer_manager.lock().await.has_pending_outgoing(&remote_peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_listen_on_address() {
+        let local_peer_id = PeerId::random();
+        let listen_addr: Multiaddr = "/ip4/127.0.0.1/udp/9090/webtransport"
+            .parse()
+            .unwrap();
+
+        let mock_transport = MockTransport::new(PeerId::random());
+        let mut transports = HashMap::new();
+        transports.insert(Protocol::WebTransport, Box::new(mock_transport.clone()) as Box<dyn Transport<Output = (PeerId, StreamMuxerBox), Error = io::Error, Listener = futures::stream::Pending<Result<futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, io::Error>>, ListenerUpgrade = futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, Dial = futures::future::BoxFuture<'static, Result<(PeerId, StreamMuxerBox), io::Error>>> + Send>);
+
+        let mut node = Node::new(local_peer_id, transports);
+
+        let result = node.listen(listen_addr).await;
+        assert!(result.is_ok());
+        assert!(*mock_transport.listen_on_called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_handle_transport_event() {
+        let local_peer_id = PeerId::random();
+        let local_addr: Multiaddr = "/ip4/127.0.0.1/udp/9090/webtransport"
+            .parse()
+            .unwrap();
+        let remote_addr: Multiaddr = "/ip4/127.0.0.1/udp/9091/webtransport"
+            .parse()
+            .unwrap();
+
+        let mut node = Node::new(local_peer_id.clone(), HashMap::new());
+
+        let remote_peer_id_for_upgrade = PeerId::random();
+        let upgrade = Box::pin(async move { Ok((remote_peer_id_for_upgrade, StreamMuxerBox::new_null())) });
+        let event = TransportEvent::Incoming {
+            remote_addr: remote_addr.clone(),
+            local_addr: local_addr.clone(),
+            upgrade,
+        };
+
+        node.handle_transport_event(event);
+
+        // We need to give some time for the event to be processed by the spawned task in handle_transport_event
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        assert!(node.peer_manager.lock().await.has_pending_incoming(&remote_addr));
+    }
+}
 	p2p_protocol.ok_or_else(|| Error::NoProtocolsInMultiaddr(address.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use multiaddr::{Multiaddr, PeerId};
+    use rs_mojave_network_core::Protocol;
+    use std::collections::HashMap;
+    use rs_mojave_network_core::{transport::Transport, connection::Connection, stream_muxer::StreamMuxerBox};
+    use async_trait::async_trait;
+    use std::io;
+
+    #[derive(Clone)]
+    struct MockTransport {
+        remote_peer_id: PeerId,
+    }
+
+    #[async_trait]
+    impl Transport for MockTransport {
+        type Output = (PeerId, StreamMuxerBox);
+        type Error = io::Error;
+        type Listener = futures::stream::Pending<Result<Self::ListenerUpgrade, Self::Error>>;
+        type ListenerUpgrade = futures::future::Pending<Result<Self::Output, Self::Error>>;
+        type Dial = futures::future::BoxFuture<'static, Result<Self::Output, Self::Error>>;
+
+        fn listen_on(&mut self, _addr: Multiaddr) -> Result<Self::Listener, Self::Error> {
+            unimplemented!()
+        }
+
+        fn dial(&mut self, _peer_id: PeerId, _addr: Multiaddr) -> Result<Self::Dial, Self::Error> {
+            let remote_peer_id = self.remote_peer_id.clone();
+            Ok(Box::pin(async move { Ok((remote_peer_id, StreamMuxerBox::new_null())) }))
+        }
+    }
+
+    #[test]
+    fn test_node_creation() {
+        let peer_id = PeerId::random();
+        let transports = HashMap::new();
+        let node = Node::new(peer_id.clone(), transports);
+        assert_eq!(node.peer_id, peer_id);
+    }
+
+    #[tokio::test]
+    async fn test_dial_remote_peer() {
+        let local_peer_id = PeerId::random();
+        let remote_peer_id = PeerId::random();
+        let remote_addr: Multiaddr = "/ip4/127.0.0.1/udp/9090/webtransport"
+            .parse()
+            .unwrap();
+
+        let mock_transport = MockTransport { remote_peer_id: remote_peer_id.clone() };
+        let mut transports = HashMap::new();
+        transports.insert(Protocol::WebTransport, Box::new(mock_transport) as Box<dyn Transport<Output = (PeerId, StreamMuxerBox), Error = io::Error, Listener = futures::stream::Pending<Result<futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, io::Error>>, ListenerUpgrade = futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, Dial = futures::future::BoxFuture<'static, Result<(PeerId, StreamMuxerBox), io::Error>>> + Send>);
+
+        let mut node = Node::new(local_peer_id, transports);
+
+        let result = node.dial(remote_peer_id.clone(), remote_addr).await;
+        assert!(result.is_ok());
+        assert!(node.peer_manager.lock().await.has_pending_outgoing(&remote_peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_listen_on_address() {
+        let local_peer_id = PeerId::random();
+        let listen_addr: Multiaddr = "/ip4/127.0.0.1/udp/9090/webtransport"
+            .parse()
+            .unwrap();
+
+        let mock_transport = MockTransport::new(PeerId::random());
+        let mut transports = HashMap::new();
+        transports.insert(Protocol::WebTransport, Box::new(mock_transport.clone()) as Box<dyn Transport<Output = (PeerId, StreamMuxerBox), Error = io::Error, Listener = futures::stream::Pending<Result<futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, io::Error>>, ListenerUpgrade = futures::future::Pending<Result<(PeerId, StreamMuxerBox), io::Error>>, Dial = futures::future::BoxFuture<'static, Result<(PeerId, StreamMuxerBox), io::Error>>> + Send>);
+
+        let mut node = Node::new(local_peer_id, transports);
+
+        let result = node.listen(listen_addr).await;
+        assert!(result.is_ok());
+        assert!(*mock_transport.listen_on_called.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_handle_transport_event() {
+        let local_peer_id = PeerId::random();
+        let local_addr: Multiaddr = "/ip4/127.0.0.1/udp/9090/webtransport"
+            .parse()
+            .unwrap();
+        let remote_addr: Multiaddr = "/ip4/127.0.0.1/udp/9091/webtransport"
+            .parse()
+            .unwrap();
+
+        let mut node = Node::new(local_peer_id.clone(), HashMap::new());
+
+        let remote_peer_id_for_upgrade = PeerId::random();
+        let upgrade = Box::pin(async move { Ok((remote_peer_id_for_upgrade, StreamMuxerBox::new_null())) });
+        let event = TransportEvent::Incoming {
+            remote_addr: remote_addr.clone(),
+            local_addr: local_addr.clone(),
+            upgrade,
+        };
+
+        node.handle_transport_event(event);
+
+        // We need to give some time for the event to be processed by the spawned task in handle_transport_event
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        assert!(node.peer_manager.lock().await.has_pending_incoming(&remote_addr));
+    }
 }
