@@ -171,6 +171,10 @@ pub trait StreamMuxerExt: StreamMuxer + Sized {
 
 impl<S> StreamMuxerExt for S where S: StreamMuxer {}
 
+/// A [`Future`] that resolves when the underlying [`StreamMuxer`] is successfully closed.
+///
+/// This is typically obtained by calling [`StreamMuxerExt::close`]. The future
+/// polls the `poll_close` method of the inner stream muxer.
 pub struct Close<S>(S);
 
 impl<S> Future for Close<S>
